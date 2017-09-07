@@ -248,6 +248,7 @@ subroutine USER_initialize_tracer(restart, day, G, GV, h, diag, OBC, CS, &
   real, pointer :: tr_ptr(:,:,:) => NULL()
   real :: PI     ! 3.1415926... calculated as 4*atan(1)
   real :: tr_y   ! Initial zonally uniform tracer concentrations.
+  real :: tr_x   ! Initial meridional uniform tracer concentrations. !JLL
   real :: dist2  ! The distance squared from a line, in m2.
   integer :: i, j, k, is, ie, js, je, isd, ied, jsd, jed, nz, m
   integer :: IsdB, IedB, JsdB, JedB, lntr
@@ -279,18 +280,34 @@ subroutine USER_initialize_tracer(restart, day, G, GV, h, diag, OBC, CS, &
         enddo ; enddo ; enddo
       enddo
 
-!    This sets a stripe of tracer across the basin.
-      PI = 4.0*atan(1.0)
-      do j=js,je
-        dist2 = (G%Rad_Earth * PI / 180.0)**2 * &
-               (G%geoLatT(i,j) - 40.0) * (G%geoLatT(i,j) - 40.0)
-        tr_y = 0.5*exp(-dist2/(1.0e5*1.0e5))
+!JLL ========================================================
+!!    This sets a stripe of tracer across the basin.
+!      PI = 4.0*atan(1.0)
+!      do j=js,je
+!        dist2 = (G%Rad_Earth * PI / 180.0)**2 * &
+!               (G%geoLatT(i,j) - 40.0) * (G%geoLatT(i,j) - 40.0)
+!        tr_y = 0.5*exp(-dist2/(1.0e5*1.0e5))
+!
+!        do k=1,nz ; do i=is,ie
+!!      This adds the stripes of tracer to every layer.
+!          CS%tr(i,j,k,1) = CS%tr(i,j,k,1) + tr_y
+!        enddo ; enddo
+!      enddo
 
-        do k=1,nz ; do i=is,ie
+!    This sets a stripe of tracer across the basin.
+!    Meridional stripe (instead of zonal) 
+      PI = 4.0*atan(1.0)
+      do i=is,ie
+        dist2 = (G%Rad_Earth * PI / 180.0)**2 * &
+               (G%geoLonT(i,j) - 40.0) * (G%geoLonT(i,j) - 40.0)
+        tr_x = 0.5*exp(-dist2/(1.0e5*1.0e5))
+
+        do k=1,nz ; do j=js,je
 !      This adds the stripes of tracer to every layer.
-          CS%tr(i,j,k,1) = CS%tr(i,j,k,1) + tr_y
+          CS%tr(i,j,k,1) = CS%tr(i,j,k,1) + tr_x
         enddo ; enddo
       enddo
+!JLL =========================================================
     endif
   endif ! restart
 
@@ -618,3 +635,4 @@ subroutine USER_tracer_example_end(CS)
 end subroutine USER_tracer_example_end
 
 end module USER_tracer_example
+
