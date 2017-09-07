@@ -30,6 +30,7 @@ use user_initialization, only : user_initialize_topography
 use DOME_initialization, only : DOME_initialize_topography
 use ISOMIP_initialization, only : ISOMIP_initialize_topography
 use benchmark_initialization, only : benchmark_initialize_topography
+use Neverland_initialization, only : Neverland_initialize_topography
 use DOME2d_initialization, only : DOME2d_initialize_topography
 use Kelvin_initialization, only : Kelvin_initialize_topography
 use sloshing_initialization, only : sloshing_initialize_topography
@@ -61,16 +62,16 @@ subroutine MOM_initialize_fixed(G, OBC, PF, write_geom, output_dir)
   ! Local
   character(len=200) :: inputdir   ! The directory where NetCDF input files are.
   character(len=200) :: config
-  character(len=40)  :: mod = "MOM_fixed_initialization" ! This module's name.
+  character(len=40)  :: mdl = "MOM_fixed_initialization" ! This module's name.
   logical :: debug
 ! This include declares and sets the variable "version".
 #include "version_variable.h"
 
   call callTree_enter("MOM_initialize_fixed(), MOM_fixed_initialization.F90")
-  call log_version(PF, mod, version, "")
-  call get_param(PF, mod, "DEBUG", debug, default=.false.)
+  call log_version(PF, mdl, version, "")
+  call get_param(PF, mdl, "DEBUG", debug, default=.false.)
 
-  call get_param(PF, mod, "INPUTDIR", inputdir, &
+  call get_param(PF, mdl, "INPUTDIR", inputdir, &
          "The directory in which input files are found.", default=".")
   inputdir = slasher(inputdir)
 
@@ -106,7 +107,7 @@ subroutine MOM_initialize_fixed(G, OBC, PF, write_geom, output_dir)
   endif
 
 ! Modulate geometric scales according to geography.
-  call get_param(PF, mod, "CHANNEL_CONFIG", config, &
+  call get_param(PF, mdl, "CHANNEL_CONFIG", config, &
                  "A parameter that determines which set of channels are \n"//&
                  "restricted to specific  widths.  Options are:\n"//&
                  " \t none - All channels have the grid width.\n"//&
@@ -129,7 +130,7 @@ subroutine MOM_initialize_fixed(G, OBC, PF, write_geom, output_dir)
 
 !   This call sets the topography at velocity points.
   if (G%bathymetry_at_vel) then
-    call get_param(PF, mod, "VELOCITY_DEPTH_CONFIG", config, &
+    call get_param(PF, mdl, "VELOCITY_DEPTH_CONFIG", config, &
                    "A string that determines how the topography is set at \n"//&
                    "velocity points. This may be 'min' or 'max'.", &
                    default="max")
@@ -176,10 +177,10 @@ subroutine MOM_initialize_topography(D, max_depth, G, PF)
 !  This is a separate subroutine so that it can be made public and shared with
 !  the ice-sheet code or other components.
 ! Set up the bottom depth, G%bathyT either analytically or from file
-  character(len=40)  :: mod = "MOM_initialize_topography" ! This subroutine's name.
+  character(len=40)  :: mdl = "MOM_initialize_topography" ! This subroutine's name.
   character(len=200) :: config
 
-  call get_param(PF, mod, "TOPO_CONFIG", config, &
+  call get_param(PF, mdl, "TOPO_CONFIG", config, &
                  "This specifies how bathymetry is specified: \n"//&
                  " \t file - read bathymetric information from the file \n"//&
                  " \t\t specified by (TOPO_FILE).\n"//&
@@ -191,6 +192,7 @@ subroutine MOM_initialize_topography(D, max_depth, G, PF)
                  " \t halfpipe - a zonally uniform channel with a half-sine \n"//&
                  " \t\t profile in the meridional direction. \n"//&
                  " \t benchmark - use the benchmark test case topography. \n"//&
+                 " \t Neverland - use the Neverland test case topography. \n"//&
                  " \t DOME - use a slope and channel configuration for the \n"//&
                  " \t\t DOME sill-overflow test case. \n"//&
                  " \t ISOMIP - use a slope and channel configuration for the \n"//&
@@ -215,6 +217,7 @@ subroutine MOM_initialize_topography(D, max_depth, G, PF)
     case ("DOME");      call DOME_initialize_topography(D, G, PF, max_depth)
     case ("ISOMIP");    call ISOMIP_initialize_topography(D, G, PF, max_depth)
     case ("benchmark"); call benchmark_initialize_topography(D, G, PF, max_depth)
+    case ("Neverland"); call Neverland_initialize_topography(D, G, PF, max_depth)
     case ("DOME2D");    call DOME2d_initialize_topography(D, G, PF, max_depth)
     case ("Kelvin");    call Kelvin_initialize_topography(D, G, PF, max_depth)
     case ("sloshing");  call sloshing_initialize_topography(D, G, PF, max_depth)
@@ -228,11 +231,11 @@ subroutine MOM_initialize_topography(D, max_depth, G, PF)
       "Unrecognized topography setup '"//trim(config)//"'")
   end select
   if (max_depth>0.) then
-    call log_param(PF, mod, "MAXIMUM_DEPTH", max_depth, &
+    call log_param(PF, mdl, "MAXIMUM_DEPTH", max_depth, &
                    "The maximum depth of the ocean.", units="m")
   else
     max_depth = diagnoseMaximumDepth(D,G)
-    call log_param(PF, mod, "!MAXIMUM_DEPTH", max_depth, &
+    call log_param(PF, mdl, "!MAXIMUM_DEPTH", max_depth, &
                    "The (diagnosed) maximum depth of the ocean.", units="m")
   endif
   if (trim(config) .ne. "DOME") then

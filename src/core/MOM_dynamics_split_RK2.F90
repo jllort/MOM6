@@ -48,10 +48,11 @@ use MOM_hor_visc,              only : horizontal_viscosity, hor_visc_init, hor_v
 use MOM_interface_heights,     only : find_eta
 use MOM_lateral_mixing_coeffs, only : VarMix_CS
 use MOM_MEKE_types,            only : MEKE_type
-use MOM_open_boundary,         only : ocean_OBC_type
-use MOM_open_boundary,         only : radiation_open_bdry_conds
+use MOM_open_boundary,         only : ocean_OBC_type, radiation_open_bdry_conds
+use MOM_open_boundary,         only : open_boundary_zero_normal_flow
+use MOM_open_boundary,         only : open_boundary_test_extern_h
 use MOM_PressureForce,         only : PressureForce, PressureForce_init, PressureForce_CS
-use MOM_set_visc,              only : set_viscous_BBL, set_viscous_ML, set_visc_CS
+use MOM_set_visc,              only : set_viscous_ML, set_visc_CS
 use MOM_tidal_forcing,         only : tidal_forcing_init, tidal_forcing_CS
 use MOM_vert_friction,         only : vertvisc, vertvisc_coef, vertvisc_remnant
 use MOM_vert_friction,         only : vertvisc_limit_vel, vertvisc_init, vertvisc_CS
@@ -175,8 +176,7 @@ type, public :: MOM_dyn_split_RK2_CS ; private
   type(ALE_CS), pointer :: ALE_CSp => NULL()
 
   ! for group halo pass
-  type(group_pass_type) :: pass_kv_bbl_thick
-  type(group_pass_type) :: pass_Ray_uv, pass_eta
+  type(group_pass_type) :: pass_eta
   type(group_pass_type) :: pass_visc_rem, pass_uvp
   type(group_pass_type) :: pass_hp_uv
   type(group_pass_type) :: pass_uv
@@ -215,7 +215,7 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
   type(forcing),                             intent(in)    :: fluxes        !< forcing fields
   real, dimension(:,:),                      pointer       :: p_surf_begin  !< surf pressure at start of this dynamic time step (Pa)
   real, dimension(:,:),                      pointer       :: p_surf_end    !< surf pressure at end   of this dynamic time step (Pa)
-  real,                                      intent(in)    :: dt_since_flux !< elapesed time since fluxes were applied (sec)
+  real,                                      intent(in)    :: dt_since_flux !< elapsed time since fluxes were applied (sec)
   real,                                      intent(in)    :: dt_therm      !< thermodynamic time step (sec)
   real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), target, intent(inout) :: uh    !< zonal volume/mass transport (m3/s or kg/s)
   real, dimension(SZI_(G),SZJB_(G),SZK_(G)), target, intent(inout) :: vh    !< merid volume/mass transport (m3/s or kg/s)
@@ -282,7 +282,6 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
                               ! relative weightings of the layers in calculating
                               ! the barotropic accelerations.
   !---For group halo pass
-  logical :: do_pass_Ray_uv, do_pass_kv_bbl_thick
   logical :: showCallTree, sym
 
   integer :: i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
@@ -323,6 +322,7 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
   endif
 
   if (associated(CS%OBC)) then
+!   call open_boundary_test_extern_h(G, CS%OBC, h)
     do k=1,nz ; do j=js-1,je+1 ; do I=is-2,ie+1
       u_old_rad_OBC(I,j,k) = u_av(I,j,k)
     enddo ; enddo ; enddo
@@ -340,30 +340,8 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
   endif
 
   !--- begin set up for group halo pass
-  call cpu_clock_begin(id_clock_pass)
-  do_pass_Ray_uv = .FALSE.
-  if (.not.G%Domain%symmetric .and. visc%calc_bbl .AND. &
-      associated(visc%Ray_u) .and. associated(visc%Ray_v)) then
-    call create_group_pass(CS%pass_Ray_uv, visc%Ray_u, visc%Ray_v, G%Domain, &
-          To_North+To_East+SCALAR_PAIR+Omit_corners, CGRID_NE, halo=1)
-    do_pass_Ray_uv = .TRUE.
-  endif
-  do_pass_kv_bbl_thick = .FALSE.
-  if (.not.G%Domain%symmetric .and. visc%calc_bbl) then
-    if (associated(visc%bbl_thick_u) .and. associated(visc%bbl_thick_v)) then
-      call create_group_pass(CS%pass_kv_bbl_thick, visc%bbl_thick_u, visc%bbl_thick_v, &
-                             G%Domain, To_North+To_East+SCALAR_PAIR+Omit_corners, &
-                             CGRID_NE, halo=1)
-      do_pass_kv_bbl_thick = .TRUE.
-    endif
-    if (associated(visc%kv_bbl_u) .and. associated(visc%kv_bbl_v)) then
-      call create_group_pass(CS%pass_kv_bbl_thick, visc%kv_bbl_u, visc%kv_bbl_v, &
-                             G%Domain, To_North+To_East+SCALAR_PAIR+Omit_corners, &
-                             CGRID_NE, halo=1)
-      do_pass_kv_bbl_thick = .TRUE.
-    endif
-  endif
 
+  call cpu_clock_begin(id_clock_pass)
   cont_stencil = continuity_stencil(CS%continuity_CSp)
   !### Apart from circle_OBCs halo for eta could be 1, but halo>=3 is required
   !### to match circle_OBCs solutions. Why?
@@ -382,28 +360,6 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
   call cpu_clock_end(id_clock_pass)
   !--- end set up for group halo pass
 
-  if (visc%calc_bbl) then
-    ! Calculate the BBL properties and store them inside visc (u,h).
-    call cpu_clock_begin(id_clock_vertvisc)
-    call enable_averaging(visc%bbl_calc_time_interval, &
-              Time_local+set_time(int(visc%bbl_calc_time_interval-dt)), CS%diag)
-    call set_viscous_BBL(u, v, h, tv, visc, G, GV, CS%set_visc_CSp)
-    call disable_averaging(CS%diag)
-    call cpu_clock_end(id_clock_vertvisc)
-
-    call cpu_clock_begin(id_clock_pass)
-    if (G%nonblocking_updates) then
-      if (do_pass_Ray_uv) call start_group_pass(CS%pass_Ray_uv, G%Domain)
-      if (do_pass_kv_bbl_thick) call start_group_pass(CS%pass_kv_bbl_thick, G%Domain)
-      ! visc%calc_bbl will be set to .false. when the message passing is complete.
-    else
-      if (do_pass_Ray_uv) call do_group_pass(CS%pass_Ray_uv, G%Domain)
-      if (do_pass_kv_bbl_thick) call do_group_pass(CS%pass_kv_bbl_thick, G%Domain)
-      visc%calc_bbl = .false.
-    endif
-    call cpu_clock_end(id_clock_pass)
-    if (showCallTree) call callTree_wayPoint("done with set_viscous_BBL (step_MOM_dyn_split_RK2)")
-  endif
 
 ! PFu = d/dx M(h,T,S)
 ! pbce = dM/deta
@@ -451,6 +407,9 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
       v_bc_accel(i,J,k) = (CS%Cav(i,J,k) + CS%PFv(i,J,k)) + CS%diffv(i,J,k)
     enddo ; enddo
   enddo
+  if (associated(CS%OBC)) then
+    call open_boundary_zero_normal_flow(CS%OBC, G, u_bc_accel, v_bc_accel)
+  endif
   call cpu_clock_end(id_clock_btforce)
 
   if (CS%debug) then
@@ -461,18 +420,6 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
     call check_redundant("pre-btstep CS%PF ", CS%PFu, CS%PFv, G)
     call check_redundant("pre-btstep CS%diff ", CS%diffu, CS%diffv, G)
     call check_redundant("pre-btstep u_bc_accel ", u_bc_accel, v_bc_accel, G)
-  endif
-
-  if (G%nonblocking_updates) then
-    call cpu_clock_begin(id_clock_pass)
-    if (visc%calc_bbl) then
-      if (do_pass_Ray_uv) call complete_group_pass(CS%pass_Ray_uv, G%Domain)
-      if (do_pass_kv_bbl_thick) call complete_group_pass(CS%pass_kv_bbl_thick, G%Domain)
-      ! visc%calc_bbl is set to .false. now that the message passing is completed.
-      visc%calc_bbl = .false.
-    endif
-    call complete_group_pass(CS%pass_eta, G%Domain)
-    call cpu_clock_end(id_clock_pass)
   endif
 
   call cpu_clock_begin(id_clock_vertvisc)
@@ -502,6 +449,7 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
 
   call cpu_clock_begin(id_clock_pass)
   if (G%nonblocking_updates) then
+    call complete_group_pass(CS%pass_eta, G%Domain)
     call start_group_pass(CS%pass_visc_rem, G%Domain)
   else
     call do_group_pass(CS%pass_eta, G%Domain)
@@ -726,6 +674,9 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
       v_bc_accel(i,J,k) = (CS%Cav(i,J,k) + CS%PFv(i,J,k)) + CS%diffv(i,J,k)
     enddo ; enddo
   enddo
+  if (associated(CS%OBC)) then
+    call open_boundary_zero_normal_flow(CS%OBC, G, u_bc_accel, v_bc_accel)
+  endif
   call cpu_clock_end(id_clock_btforce)
 
   if (CS%debug) then
@@ -910,7 +861,7 @@ subroutine register_restarts_dyn_split_RK2(HI, GV, param_file, CS, restart_CS, u
   real, dimension(SZI_(HI),SZJB_(HI),SZK_(GV)), target, intent(inout) :: vh !< merid volume/mass transport (m3/s or kg/s)
 
   type(vardesc)      :: vd
-  character(len=40)  :: mod = "MOM_dynamics_split_RK2" ! This module's name.
+  character(len=40)  :: mdl = "MOM_dynamics_split_RK2" ! This module's name.
   character(len=48)  :: thickness_units, flux_units
 
   integer :: isd, ied, jsd, jed, nz, IsdB, IedB, JsdB, JedB
@@ -1004,7 +955,7 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, param_fil
                                                                           !! the velocity is truncated (this should be 0).
 
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)) :: h_tmp
-  character(len=40) :: mod = "MOM_dynamics_split_RK2" ! This module's name.
+  character(len=40) :: mdl = "MOM_dynamics_split_RK2" ! This module's name.
   character(len=48) :: thickness_units, flux_units
   type(group_pass_type) :: pass_h_tmp, pass_av_h_uvh
   logical :: use_tides, debug_truncations
@@ -1026,9 +977,9 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, param_fil
 
   CS%diag => diag
 
-  call get_param(param_file, mod, "TIDES", use_tides, &
+  call get_param(param_file, mdl, "TIDES", use_tides, &
                  "If true, apply tidal momentum forcing.", default=.false.)
-  call get_param(param_file, mod, "BE", CS%be, &
+  call get_param(param_file, mdl, "BE", CS%be, &
                  "If SPLIT is true, BE determines the relative weighting \n"//&
                  "of a  2nd-order Runga-Kutta baroclinic time stepping \n"//&
                  "scheme (0.5) and a backward Euler scheme (1) that is \n"//&
@@ -1036,7 +987,7 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, param_fil
                  "from 0.5 to 1, but instability may occur near 0.5. \n"//&
                  "BE is also applicable if SPLIT is false and USE_RK2 \n"//&
                  "is true.", units="nondim", default=0.6)
-  call get_param(param_file, mod, "BEGW", CS%begw, &
+  call get_param(param_file, mdl, "BEGW", CS%begw, &
                  "If SPLIT is true, BEGW is a number from 0 to 1 that \n"//&
                  "controls the extent to which the treatment of gravity \n"//&
                  "waves is forward-backward (0) or simulated backward \n"//&
@@ -1045,16 +996,16 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, param_fil
                  "between 0 and 0.5 to damp gravity waves.", &
                  units="nondim", default=0.0)
 
-  call get_param(param_file, mod, "SPLIT_BOTTOM_STRESS", CS%split_bottom_stress, &
+  call get_param(param_file, mdl, "SPLIT_BOTTOM_STRESS", CS%split_bottom_stress, &
                  "If true, provide the bottom stress calculated by the \n"//&
                  "vertical viscosity to the barotropic solver.", default=.false.)
-  call get_param(param_file, mod, "BT_USE_LAYER_FLUXES", CS%BT_use_layer_fluxes, &
+  call get_param(param_file, mdl, "BT_USE_LAYER_FLUXES", CS%BT_use_layer_fluxes, &
                  "If true, use the summed layered fluxes plus an \n"//&
                  "adjustment due to the change in the barotropic velocity \n"//&
                  "in the barotropic continuity equation.", default=.true.)
-  call get_param(param_file, mod, "DEBUG", CS%debug, &
+  call get_param(param_file, mdl, "DEBUG", CS%debug, &
                  "If true, write out verbose debugging data.", default=.false.)
-  call get_param(param_file, mod, "DEBUG_TRUNCATIONS", debug_truncations, &
+  call get_param(param_file, mdl, "DEBUG_TRUNCATIONS", debug_truncations, &
                  default=.false.)
 
   allocate(CS%taux_bot(IsdB:IedB,jsd:jed)) ; CS%taux_bot(:,:) = 0.0
@@ -1253,37 +1204,5 @@ end subroutine end_dyn_split_RK2
 !!  does not have its own control structure, but shares the same
 !!  control structure with MOM.F90 and the other MOM_dynamics_...
 !!  modules.
-!!
-!!  Macros written all in capital letters are defined in MOM_memory.h.
-!!
-!!  \section section_gridlayout MOM grid layout
-!!
-!!  A small fragment of the grid is shown below:
-!!
-!! \verbatim
-!!    j+1  x ^ x ^ x
-!!
-!!    j+1  > o > o >
-!!
-!!    j    x ^ x ^ x
-!!
-!!    j    > o > o >
-!!
-!!    j-1  x ^ x ^ x
-!!
-!!        i-1  i  i+1
-!!
-!!           i  i+1
-!!
-!! \endverbatim
-!!
-!!  Fields at each point
-!!  * x =  q, CoriolisBu
-!!  * ^ =  v, PFv, CAv, vh, diffv, tauy, vbt, vhtr
-!!  * > =  u, PFu, CAu, uh, diffu, taux, ubt, uhtr
-!!  * o =  h, bathyT, eta, T, S, tr
-!!
-!!  The boundaries always run through q grid points (x).
-
 
 end module MOM_dynamics_split_RK2

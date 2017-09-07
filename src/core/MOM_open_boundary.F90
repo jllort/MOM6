@@ -74,6 +74,7 @@ type, public :: OBC_segment_type
   logical :: oblique        !< Oblique waves supported at radiation boundary.
   logical :: nudged         !< Optional supplement to radiation boundary.
   logical :: specified      !< Boundary fixed to external value.
+  logical :: open           !< Boundary is open for continuity solver.
   logical :: gradient       !< Zero gradient at boundary.
   logical :: values_needed  !< Whether or not external OBC fields are needed.
   integer :: direction      !< Boundary faces one of the four directions.
@@ -198,7 +199,7 @@ end type OBC_registry_type
 
 integer :: id_clock_pass
 
-character(len=40)  :: mod = "MOM_open_boundary" ! This module's name.
+character(len=40)  :: mdl = "MOM_open_boundary" ! This module's name.
 ! This include declares and sets the variable "version".
 #include "version_variable.h"
 
@@ -223,51 +224,51 @@ subroutine open_boundary_config(G, param_file, OBC)
 
   allocate(OBC)
 
-  call log_version(param_file, mod, version, "Controls where open boundaries are located, what "//&
+  call log_version(param_file, mdl, version, "Controls where open boundaries are located, what "//&
                  "kind of boundary condition to impose, and what data to apply, if any.")
-  call get_param(param_file, mod, "OBC_NUMBER_OF_SEGMENTS", OBC%number_of_segments, &
+  call get_param(param_file, mdl, "OBC_NUMBER_OF_SEGMENTS", OBC%number_of_segments, &
                  "The number of open boundary segments.", &
                  default=0)
-  call get_param(param_file, mod, "G_EARTH", OBC%g_Earth, &
+  call get_param(param_file, mdl, "G_EARTH", OBC%g_Earth, &
                  "The gravitational acceleration of the Earth.", &
                  units="m s-2", default = 9.80)
-  call get_param(param_file, mod, "OBC_USER_CONFIG", config1, &
+  call get_param(param_file, mdl, "OBC_USER_CONFIG", config1, &
                  "A string that sets how the open boundary conditions are \n"//&
                  " configured: \n", default="none", do_not_log=.true.)
-  call get_param(param_file, mod, "NK", OBC%ke, &
+  call get_param(param_file, mdl, "NK", OBC%ke, &
                  "The number of model layers", default=0, do_not_log=.true.)
 
   if (config1 .ne. "none") OBC%user_BCs_set_globally = .true.
   ! It's in state initialization...
 !  if (config1 .eq. "tidal_bay") OBC%update_OBC = .true.
 
-  call get_param(param_file, mod, "EXTEND_OBC_SEGMENTS", OBC%extend_segments, &
+  call get_param(param_file, mdl, "EXTEND_OBC_SEGMENTS", OBC%extend_segments, &
                    "If true, extend OBC segments. This option is used to recover\n"//&
                    "legacy solutions dependent on an incomplete implementaion of OBCs.\n"//&
                    "This option will be obsoleted in the future.", default=.false.)
 
   if (OBC%number_of_segments > 0) then
-    call get_param(param_file, mod, "OBC_ZERO_VORTICITY", OBC%zero_vorticity, &
+    call get_param(param_file, mdl, "OBC_ZERO_VORTICITY", OBC%zero_vorticity, &
          "If true, sets relative vorticity to zero on open boundaries.", &
          default=.false.)
-    call get_param(param_file, mod, "OBC_FREESLIP_VORTICITY", OBC%freeslip_vorticity, &
+    call get_param(param_file, mdl, "OBC_FREESLIP_VORTICITY", OBC%freeslip_vorticity, &
          "If true, sets the normal gradient of tangential velocity to\n"// &
          "zero in the relative vorticity on open boundaries. This cannot\n"// &
          "be true if OBC_ZERO_VORTICITY is True.", default=.false.)
     if (OBC%zero_vorticity .and. OBC%freeslip_vorticity) call MOM_error(FATAL, &
          "MOM_open_boundary.F90, open_boundary_config: "//&
          "Only one of OBC_ZERO_VORTICITY and OBC_FREESLIP_VORTICITY can be True at once.")
-    call get_param(param_file, mod, "OBC_ZERO_STRAIN", OBC%zero_strain, &
+    call get_param(param_file, mdl, "OBC_ZERO_STRAIN", OBC%zero_strain, &
          "If true, sets the strain used in the stress tensor to zero on open boundaries.", &
          default=.false.)
-    call get_param(param_file, mod, "OBC_FREESLIP_STRAIN", OBC%freeslip_strain, &
+    call get_param(param_file, mdl, "OBC_FREESLIP_STRAIN", OBC%freeslip_strain, &
          "If true, sets the normal gradient of tangential velocity to\n"// &
          "zero in the strain use in the stress tensor on open boundaries. This cannot\n"// &
          "be true if OBC_ZERO_STRAIN is True.", default=.false.)
     if (OBC%zero_strain .and. OBC%freeslip_strain) call MOM_error(FATAL, &
          "MOM_open_boundary.F90, open_boundary_config: "//&
          "Only one of OBC_ZERO_STRAIN and OBC_FREESLIP_STRAIN can be True at once.")
-    call get_param(param_file, mod, "OBC_ZERO_BIHARMONIC", OBC%zero_biharmonic, &
+    call get_param(param_file, mdl, "OBC_ZERO_BIHARMONIC", OBC%zero_biharmonic, &
          "If true, zeros the Laplacian of flow on open boundaries in the biharmonic\n"//&
          "viscosity term.", default=.false.)
     ! Allocate everything
@@ -279,6 +280,7 @@ subroutine open_boundary_config(G, param_file, OBC)
       OBC%segment(l)%oblique = .false.
       OBC%segment(l)%nudged = .false.
       OBC%segment(l)%specified = .false.
+      OBC%segment(l)%open = .false.
       OBC%segment(l)%gradient = .false.
       OBC%segment(l)%values_needed = .false.
       OBC%segment(l)%direction = OBC_NONE
@@ -293,7 +295,7 @@ subroutine open_boundary_config(G, param_file, OBC)
 
     do l = 1, OBC%number_of_segments
       write(segment_param_str(1:15),"('OBC_SEGMENT_',i3.3)") l
-      call get_param(param_file, mod, segment_param_str, segment_str, &
+      call get_param(param_file, mdl, segment_param_str, segment_str, &
            "Documentation needs to be dynamic?????", &
            fail_if_missing=.true.)
       segment_str = remove_spaces(segment_str)
@@ -358,23 +360,23 @@ subroutine initialize_segment_data(G, OBC, PF)
   ! param file so that I can use it later in step_MOM in order to finish
   ! initializing segments on the first step.
 
-  call get_param(PF, mod, "INPUTDIR", inputdir, default=".")
+  call get_param(PF, mdl, "INPUTDIR", inputdir, default=".")
   inputdir = slasher(inputdir)
 
-  call get_param(PF, mod, "REMAPPING_SCHEME", remappingScheme, &
+  call get_param(PF, mdl, "REMAPPING_SCHEME", remappingScheme, &
           "This sets the reconstruction scheme used\n"//&
           "for vertical remapping for all variables.\n"//&
           "It can be one of the following schemes:\n"//&
           trim(remappingSchemesDoc), default=remappingDefaultScheme,do_not_log=.true.)
-  call get_param(PF, mod, "FATAL_CHECK_RECONSTRUCTIONS", check_reconstruction, &
+  call get_param(PF, mdl, "FATAL_CHECK_RECONSTRUCTIONS", check_reconstruction, &
           "If true, cell-by-cell reconstructions are checked for\n"//&
           "consistency and if non-monotonicity or an inconsistency is\n"//&
           "detected then a FATAL error is issued.", default=.false.,do_not_log=.true.)
-  call get_param(PF, mod, "FATAL_CHECK_REMAPPING", check_remapping, &
+  call get_param(PF, mdl, "FATAL_CHECK_REMAPPING", check_remapping, &
           "If true, the results of remapping are checked for\n"//&
           "conservation and new extrema and if an inconsistency is\n"//&
           "detected then a FATAL error is issued.", default=.false.,do_not_log=.true.)
-  call get_param(PF, mod, "REMAP_BOUND_INTERMEDIATE_VALUES", force_bounds_in_subcell, &
+  call get_param(PF, mdl, "REMAP_BOUND_INTERMEDIATE_VALUES", force_bounds_in_subcell, &
           "If true, the values on the intermediate grid used for remapping\n"//&
           "are forced to be bounded, which might not be the case due to\n"//&
           "round off.", default=.false.,do_not_log=.true.)
@@ -400,7 +402,7 @@ subroutine initialize_segment_data(G, OBC, PF)
 
     write(segnam,"('OBC_SEGMENT_',i3.3,'_DATA')") n
     write(suffix,"('_segment_',i3.3)") n
-    call get_param(PF, mod, segnam, segstr)
+    call get_param(PF, mdl, segnam, segstr)
 
     call parse_segment_data_str(trim(segstr), fields=fields, num_fields=num_fields)
     if (num_fields == 0) then
@@ -601,13 +603,16 @@ subroutine setup_u_point_obc(OBC, G, segment_str, l_seg)
       cycle
     elseif (trim(action_str(a_loop)) == 'FLATHER') then
       OBC%segment(l_seg)%Flather = .true.
+      OBC%segment(l_seg)%open = .true.
       OBC%Flather_u_BCs_exist_globally = .true.
       OBC%open_u_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'ORLANSKI') then
       OBC%segment(l_seg)%radiation = .true.
+      OBC%segment(l_seg)%open = .true.
       OBC%open_u_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'OBLIQUE') then
       OBC%segment(l_seg)%oblique = .true.
+      OBC%segment(l_seg)%open = .true.
       OBC%oblique_BCs_exist_globally = .true.
       OBC%open_u_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'NUDGED') then
@@ -617,6 +622,7 @@ subroutine setup_u_point_obc(OBC, G, segment_str, l_seg)
       OBC%nudged_u_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'GRADIENT') then
       OBC%segment(l_seg)%gradient = .true.
+      OBC%segment(l_seg)%open = .true.
       OBC%open_u_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'LEGACY') then
       OBC%segment(l_seg)%Flather = .true.
@@ -700,13 +706,16 @@ subroutine setup_v_point_obc(OBC, G, segment_str, l_seg)
       cycle
     elseif (trim(action_str(a_loop)) == 'FLATHER') then
       OBC%segment(l_seg)%Flather = .true.
+      OBC%segment(l_seg)%open = .true.
       OBC%Flather_v_BCs_exist_globally = .true.
       OBC%open_v_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'ORLANSKI') then
       OBC%segment(l_seg)%radiation = .true.
+      OBC%segment(l_seg)%open = .true.
       OBC%open_v_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'OBLIQUE') then
       OBC%segment(l_seg)%oblique = .true.
+      OBC%segment(l_seg)%open = .true.
       OBC%oblique_BCs_exist_globally = .true.
       OBC%open_v_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'NUDGED') then
@@ -716,6 +725,7 @@ subroutine setup_v_point_obc(OBC, G, segment_str, l_seg)
       OBC%nudged_v_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'GRADIENT') then
       OBC%segment(l_seg)%gradient = .true.
+      OBC%segment(l_seg)%open = .true.
       OBC%open_v_BCs_exist_globally = .true.
     elseif (trim(action_str(a_loop)) == 'LEGACY') then
       OBC%segment(l_seg)%radiation = .true.
@@ -942,19 +952,19 @@ subroutine open_boundary_init(G, param_file, OBC)
   if (.not.associated(OBC)) return
 
   if ( OBC%Flather_u_BCs_exist_globally .or. OBC%Flather_v_BCs_exist_globally ) then
-    call get_param(param_file, mod, "OBC_RADIATION_MAX", OBC%rx_max, &
+    call get_param(param_file, mdl, "OBC_RADIATION_MAX", OBC%rx_max, &
                    "The maximum magnitude of the baroclinic radiation \n"//&
                    "velocity (or speed of characteristics).  This is only \n"//&
                    "used if one of the open boundary segments is using Orlanski.", &
                    units="m s-1", default=10.0)
-    call get_param(param_file, mod, "OBC_RAD_VEL_WT", OBC%gamma_uv, &
+    call get_param(param_file, mdl, "OBC_RAD_VEL_WT", OBC%gamma_uv, &
                    "The relative weighting for the baroclinic radiation \n"//&
                    "velocities (or speed of characteristics) at the new \n"//&
                    "time level (1) or the running mean (0) for velocities. \n"//&
                    "Valid values range from 0 to 1. This is only used if \n"//&
                    "one of the open boundary segments is using Orlanski.", &
                    units="nondim",  default=0.3)
-    call get_param(param_file, mod, "OBC_RAD_THICK_WT", OBC%gamma_h, &
+    call get_param(param_file, mdl, "OBC_RAD_THICK_WT", OBC%gamma_h, &
                    "The relative weighting for the baroclinic radiation \n"//&
                    "velocities (or speed of characteristics) at the new \n"//&
                    "time level (1) or the running mean (0) for thicknesses. \n"//&
@@ -1140,9 +1150,13 @@ end subroutine open_boundary_impose_land_mask
 subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
   type(ocean_grid_type),                     intent(inout) :: G !< Ocean grid structure
   type(ocean_OBC_type),                      pointer       :: OBC !< Open boundary control structure
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), intent(inout) :: u_new !< New u values on open boundaries
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), intent(inout) :: u_new !< On exit, new u values on open boundaries
+                                                                    !! On entry, the old time-level v but
+                                                                    !! including barotropic accelerations.
   real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), intent(in)    :: u_old !< Original unadjusted u
-  real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(inout) :: v_new !< New v values on open boundaries
+  real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(inout) :: v_new !< On exit, new v values on open boundaries.
+                                                                    !! On entry, the old time-level v but
+                                                                    !! including barotropic accelerations.
   real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(in)    :: v_old !< Original unadjusted v
   real,                                      intent(in)    :: dt    !< Appropriate timestep
   ! Local variables
@@ -1166,7 +1180,7 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
   do n=1,OBC%number_of_segments
      segment=>OBC%segment(n)
      if (.not. segment%on_pe) cycle
-     if (segment%oblique) call gradient_at_q_points(G,segment,u_old,v_old)
+     if (segment%oblique) call gradient_at_q_points(G,segment,u_new,v_new)
      if (segment%direction == OBC_DIRECTION_E) then
        I=segment%HI%IscB
        do k=1,nz ;  do j=segment%HI%jsc,segment%HI%jec
@@ -1177,7 +1191,10 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
            if (dhdt*dhdx > 0.0) rx_new = min( (dhdt/dhdx), rx_max) ! outward phase speed
            rx_avg = (1.0-gamma_u)*segment%rx_normal(I,j,k) + gamma_u*rx_new
            segment%rx_normal(I,j,k) = rx_avg
-           segment%normal_vel(I,j,k) = (u_old(I,j,k) + rx_avg*u_new(I-1,j,k)) / (1.0+rx_avg)
+           ! The new boundary value is interpolated between future interior
+           ! value, u_new(I-1) and past boundary value but with barotropic
+           ! accelerations, u_new(I).
+           segment%normal_vel(I,j,k) = (u_new(I,j,k) + rx_avg*u_new(I-1,j,k)) / (1.0+rx_avg)
          elseif (segment%oblique) then
            dhdt = u_old(I-1,j,k)-u_new(I-1,j,k) !old-new
            dhdx = u_new(I-1,j,k)-u_new(I-2,j,k) !in new time backward sasha for I-1
@@ -1191,16 +1208,14 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
              endif
 !          endif
            if (dhdt*dhdx < 0.0) dhdt = 0.0
-           if (dhdx == 0.0) dhdx=eps  ! avoid segv
-           Cx = min(dhdt/dhdx,rx_max) ! default to normal radiation
+           Cx = min(dhdt*dhdx,rx_max) ! default to normal radiation
 !          Cy = 0.0
            cff = max(dhdx*dhdx,eps)
 !          if (segment%oblique) then
              cff = max(dhdx*dhdx + dhdy*dhdy, eps)
-             if (dhdy==0.) dhdy=eps ! avoid segv
-             Cy = min(cff,max(dhdt/dhdy,-cff))
+             Cy = min(cff,max(dhdt*dhdy,-cff))
 !          endif
-           segment%normal_vel(I,j,k) = ((cff*u_old(I,j,k) + Cx*u_new(I-1,j,k)) - &
+           segment%normal_vel(I,j,k) = ((cff*u_new(I,j,k) + Cx*u_new(I-1,j,k)) - &
               (max(Cy,0.0)*segment%grad_normal(J-1,2,k) + min(Cy,0.0)*segment%grad_normal(J,2,k))) / (cff + Cx)
          elseif (segment%gradient) then
            segment%normal_vel(I,j,k) = u_new(I-1,j,k)
@@ -1211,7 +1226,7 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
            else
              tau = segment%Tnudge_out
            endif
-           segment%normal_vel(I,j,k) = u_new(I,j,k) + dt*tau*(segment%nudged_normal_vel(I,j,k) - u_old(I,j,k))
+           segment%normal_vel(I,j,k) = u_new(I,j,k) + dt*tau*(segment%nudged_normal_vel(I,j,k) - u_new(I,j,k))
          endif
        enddo; enddo
      endif
@@ -1226,7 +1241,10 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
            if (dhdt*dhdx > 0.0) rx_new = min( (dhdt/dhdx), rx_max)
            rx_avg = (1.0-gamma_u)*segment%rx_normal(I,j,k) + gamma_u*rx_new
            segment%rx_normal(I,j,k) = rx_avg
-           segment%normal_vel(I,j,k) = (u_old(I,j,k) + rx_avg*u_new(I+1,j,k)) / (1.0+rx_avg)
+           ! The new boundary value is interpolated between future interior
+           ! value, u_new(I+1) and past boundary value but with barotropic
+           ! accelerations, u_new(I).
+           segment%normal_vel(I,j,k) = (u_new(I,j,k) + rx_avg*u_new(I+1,j,k)) / (1.0+rx_avg)
          elseif (segment%oblique) then
            dhdt = u_old(I+1,j,k)-u_new(I+1,j,k) !old-new
            dhdx = u_new(I+1,j,k)-u_new(I+2,j,k) !in new time forward sasha for I+1
@@ -1240,16 +1258,14 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
              endif
 !          endif
            if (dhdt*dhdx < 0.0) dhdt = 0.0
-           if (dhdx == 0.0) dhdx=eps  ! avoid segv
-           Cx = min(dhdt/dhdx,rx_max) ! default to normal flow only
+           Cx = min(dhdt*dhdx,rx_max) ! default to normal flow only
 !          Cy = 0.
            cff = max(dhdx*dhdx, eps)
 !          if (segment%oblique) then
              cff = max(dhdx*dhdx + dhdy*dhdy, eps)
-             if (dhdy==0.) dhdy=eps ! avoid segv
-             Cy = min(cff,max(dhdt/dhdy,-cff))
+             Cy = min(cff,max(dhdt*dhdy,-cff))
 !          endif
-           segment%normal_vel(I,j,k) = ((cff*u_old(I,j,k) + Cx*u_new(I+1,j,k)) - &
+           segment%normal_vel(I,j,k) = ((cff*u_new(I,j,k) + Cx*u_new(I+1,j,k)) - &
              (max(Cy,0.0)*segment%grad_normal(J-1,2,k) + min(Cy,0.0)*segment%grad_normal(J,2,k))) / (cff + Cx)
          elseif (segment%gradient) then
            segment%normal_vel(I,j,k) = u_new(I+1,j,k)
@@ -1260,7 +1276,7 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
            else
              tau = segment%Tnudge_out
            endif
-           segment%normal_vel(I,j,k) = u_new(I,j,k) + dt*tau*(segment%nudged_normal_vel(I,j,k) - u_old(I,j,k))
+           segment%normal_vel(I,j,k) = u_new(I,j,k) + dt*tau*(segment%nudged_normal_vel(I,j,k) - u_new(I,j,k))
          endif
        enddo; enddo
      endif
@@ -1275,7 +1291,10 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
            if (dhdt*dhdy > 0.0) ry_new = min( (dhdt/dhdy), ry_max)
            ry_avg = (1.0-gamma_v)*segment%rx_normal(I,j,k) + gamma_v*ry_new
            segment%rx_normal(i,J,k) = ry_avg
-           segment%normal_vel(i,J,k) = (v_old(i,J,k) + ry_avg*v_new(i,J-1,k)) / (1.0+ry_avg)
+           ! The new boundary value is interpolated between future interior
+           ! value, v_new(J-1) and past boundary value but with barotropic
+           ! accelerations, v_new(J).
+           segment%normal_vel(i,J,k) = (v_new(i,J,k) + ry_avg*v_new(i,J-1,k)) / (1.0+ry_avg)
          elseif (segment%oblique) then
            dhdt = v_old(i,J-1,k)-v_new(i,J-1,k) !old-new
            dhdy = v_new(i,J-1,k)-v_new(i,J-2,k) !in new time backward sasha for J-1
@@ -1289,16 +1308,14 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
              endif
 !          endif
            if (dhdt*dhdy < 0.0) dhdt = 0.0
-           if (dhdy == 0.0) dhdy=eps  ! avoid segv
-           Cy = min(dhdt/dhdy,rx_max) ! default to normal flow only
+           Cy = min(dhdt*dhdy,rx_max) ! default to normal flow only
 !          Cx = 0
            cff = max(dhdy*dhdy, eps)
 !          if (segment%oblique) then
              cff = max(dhdx*dhdx + dhdy*dhdy, eps)
-             if (dhdx==0.) dhdx=eps ! avoid segv
-             Cx = min(cff,max(dhdt/dhdx,-cff))
+             Cx = min(cff,max(dhdt*dhdx,-cff))
 !          endif
-           segment%normal_vel(i,J,k) = ((cff*v_old(i,J,k) + Cy*v_new(i,J-1,k)) - &
+           segment%normal_vel(i,J,k) = ((cff*v_new(i,J,k) + Cy*v_new(i,J-1,k)) - &
               (max(Cx,0.0)*segment%grad_normal(I-1,2,k) + min(Cx,0.0)*segment%grad_normal(I,2,k))) / (cff + Cy)
          elseif (segment%gradient) then
            segment%normal_vel(i,J,k) = v_new(i,J-1,k)
@@ -1309,7 +1326,7 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
            else
              tau = segment%Tnudge_out
            endif
-           segment%normal_vel(i,J,k) = v_new(i,J,k) + dt*tau*(segment%nudged_normal_vel(i,J,k) - v_old(i,J,k))
+           segment%normal_vel(i,J,k) = v_new(i,J,k) + dt*tau*(segment%nudged_normal_vel(i,J,k) - v_new(i,J,k))
          endif
        enddo; enddo
      endif
@@ -1325,7 +1342,10 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
            if (dhdt*dhdy > 0.0) ry_new = min( (dhdt/dhdy), ry_max)
            ry_avg = (1.0-gamma_v)*segment%rx_normal(I,j,k) + gamma_v*ry_new
            segment%rx_normal(i,J,k) = ry_avg
-           segment%normal_vel(i,J,k) = (v_old(i,J,k) + ry_avg*v_new(i,J+1,k)) / (1.0+ry_avg)
+           ! The new boundary value is interpolated between future interior
+           ! value, v_new(J+1) and past boundary value but with barotropic
+           ! accelerations, v_new(J).
+           segment%normal_vel(i,J,k) = (v_new(i,J,k) + ry_avg*v_new(i,J+1,k)) / (1.0+ry_avg)
          elseif (segment%oblique) then
            dhdt = v_old(i,J+1,k)-v_new(i,J+1,k) !old-new
            dhdy = v_new(i,J+1,k)-v_new(i,J+2,k) !in new time backward sasha for J-1
@@ -1339,16 +1359,14 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
              endif
 !          endif
            if (dhdt*dhdy < 0.0) dhdt = 0.0
-           if (dhdy == 0.0) dhdy=eps  ! avoid segv
-           Cy = min(dhdt/dhdy,rx_max) ! default to normal flow only
+           Cy = min(dhdt*dhdy,rx_max) ! default to normal flow only
 !          Cx = 0
            cff = max(dhdy*dhdy, eps)
 !          if (segment%oblique) then
              cff = max(dhdx*dhdx + dhdy*dhdy, eps)
-             if (dhdx==0.) dhdx=eps ! avoid segv
-             Cx = min(cff,max(dhdt/dhdx,-cff))
+             Cx = min(cff,max(dhdt*dhdx,-cff))
 !          endif
-           segment%normal_vel(i,J,k) = ((cff*v_old(i,J,k) + Cy*v_new(i,J+1,k)) - &
+           segment%normal_vel(i,J,k) = ((cff*v_new(i,J,k) + Cy*v_new(i,J+1,k)) - &
               (max(Cx,0.0)*segment%grad_normal(I-1,2,k) + min(Cx,0.0)*segment%grad_normal(I,2,k))) / (cff + Cy)
          elseif (segment%gradient) then
            segment%normal_vel(i,J,k) = v_new(i,J+1,k)
@@ -1359,7 +1377,7 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, dt)
            else
              tau = segment%Tnudge_out
            endif
-           segment%normal_vel(i,J,k) = v_new(i,J,k) + dt*tau*(segment%nudged_normal_vel(i,J,k) - v_old(i,J,k))
+           segment%normal_vel(i,J,k) = v_new(i,J,k) + dt*tau*(segment%nudged_normal_vel(i,J,k) - v_new(i,J,k))
          endif
        enddo; enddo
      end if
@@ -1516,7 +1534,7 @@ subroutine set_tracer_data(OBC, tv, h, G, PF, tracer_Reg)
   integer :: isd_off, jsd_off
   integer :: IsdB, IedB, JsdB, JedB
   type(OBC_segment_type), pointer :: segment ! pointer to segment type list
-  character(len=40)  :: mod = "set_tracer_data" ! This subroutine's name.
+  character(len=40)  :: mdl = "set_tracer_data" ! This subroutine's name.
   character(len=200) :: filename, OBC_file, inputdir ! Strings for file/path
 
   real :: temp_u(G%domain%niglobal+1,G%domain%njglobal)
@@ -1662,7 +1680,7 @@ subroutine allocate_OBC_segment_data(OBC, segment)
   ! Local variables
   integer :: isd, ied, jsd, jed
   integer :: IsdB, IedB, JsdB, JedB
-  character(len=40)  :: mod = "allocate_OBC_segment_data" ! This subroutine's name.
+  character(len=40)  :: mdl = "allocate_OBC_segment_data" ! This subroutine's name.
 
   isd = segment%HI%isd ; ied = segment%HI%ied
   jsd = segment%HI%jsd ; jed = segment%HI%jed
@@ -1806,7 +1824,7 @@ subroutine update_OBC_segment_data(G, GV, OBC, tv, h, Time)
 
   integer :: i, j, k, is, ie, js, je, isd, ied, jsd, jed
   integer :: IsdB, IedB, JsdB, JedB, n, m, nz
-  character(len=40)  :: mod = "set_OBC_segment_data" ! This subroutine's name.
+  character(len=40)  :: mdl = "set_OBC_segment_data" ! This subroutine's name.
   character(len=200) :: filename, OBC_file, inputdir ! Strings for file/path
   type(OBC_segment_type), pointer :: segment
   integer, dimension(4) :: siz,siz2
@@ -2025,14 +2043,14 @@ subroutine OBC_registry_init(param_file, Reg)
   integer, save :: init_calls = 0
 
 #include "version_variable.h"
-  character(len=40)  :: mod = "MOM_open_boundary" ! This module's name.
+  character(len=40)  :: mdl = "MOM_open_boundary" ! This module's name.
   character(len=256) :: mesg    ! Message for error messages.
 
   if (.not.associated(Reg)) then ; allocate(Reg)
   else ; return ; endif
 
   ! Read all relevant parameters and write them to the model log.
-! call log_version(param_file, mod, version, "")
+! call log_version(param_file, mdl,s version, "")
 
   init_calls = init_calls + 1
   if (init_calls > 1) then
